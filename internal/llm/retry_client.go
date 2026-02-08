@@ -133,10 +133,12 @@ func (c *RetryableClient) ChatStreamWithTools(
 	return c.inner.ChatStreamWithTools(ctx, messages, tools)
 }
 
-// Ensure RetryableClient implements the same interface as Client
+// Ensure RetryableClient implements the same interface as Client (including streaming methods)
 var _ interface {
 	Chat(ctx context.Context, messages []Message) (*ChatResponse, error)
 	ChatWithTools(ctx context.Context, messages []Message, tools []ToolDef) (*ChatResponse, error)
+	ChatStream(ctx context.Context, messages []Message) (<-chan ChatResponse, <-chan error)
+	ChatStreamWithTools(ctx context.Context, messages []Message, tools []ToolDef) (<-chan ChatResponse, <-chan error)
 } = (*RetryableClient)(nil)
 
 // RetryConfigFromProvider 从 ProviderConfig 创建 RetryConfig

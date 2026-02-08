@@ -29,11 +29,6 @@ type SoulErrorMsg struct {
 // SoulDoneMsg signals that Soul has finished processing a message.
 type SoulDoneMsg struct{}
 
-// SoulStreamChunkMsg carries a streaming content chunk from Soul.
-type SoulStreamChunkMsg struct {
-	Content string
-}
-
 // errMsg is an internal UI error.
 type errMsg struct {
 	err error

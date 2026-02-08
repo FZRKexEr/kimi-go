@@ -399,7 +399,11 @@ func (s *Soul) processWithStreaming(ctx context.Context, client LLMClient, messa
 		case <-ctx.Done():
 			return assistantMsg, ctx.Err()
 
-		case err := <-errCh:
+		case err, ok := <-errCh:
+			if !ok {
+				// errCh closed, ignore and continue waiting for respCh
+				continue
+			}
 			if err != nil {
 				return assistantMsg, err
 			}

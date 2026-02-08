@@ -192,6 +192,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Content: msg.Err.Error(),
 		})
 		m.loading = false
+		m.streaming = false
+		m.streamingIndex = -1
 		m.textarea.Focus()
 		m.viewport.SetContent(renderConversation(m.messages, m.mdRenderer))
 		m.viewport.GotoBottom()
@@ -210,6 +212,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Content: msg.err.Error(),
 		})
 		m.loading = false
+		m.streaming = false
+		m.streamingIndex = -1
 		m.textarea.Focus()
 		m.viewport.SetContent(renderConversation(m.messages, m.mdRenderer))
 		m.viewport.GotoBottom()

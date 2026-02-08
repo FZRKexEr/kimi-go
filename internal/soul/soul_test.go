@@ -771,3 +771,186 @@ func TestSoul_LLMHistory_Accumulates(t *testing.T) {
 		t.Errorf("expected 4 history entries, got %d", len(s.llmHistory))
 	}
 }
+
+// --- Streaming tests ---
+
+// mockStreamingLLMServer creates a test HTTP server that returns streaming responses.
+func mockStreamingLLMServer(t *testing.T, chunks []string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Check if it's a streaming request
+		var reqBody map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		isStream := false
+		if stream, ok := reqBody["stream"].(bool); ok && stream {
+			isStream = true
+		}
+
+		if !isStream {
+			// Non-streaming fallback
+			resp := llm.ChatResponse{
+				ID:    "resp-1",
+				Model: "test",
+				Choices: []struct {
+					Index        int         `json:"index"`
+					Message      llm.Message `json:"message"`
+					Delta        llm.Message `json:"delta"`
+					FinishReason string      `json:"finish_reason"`
+				}{
+					{
+						Index:        0,
+						Message:      llm.Message{Role: "assistant", Content: "fallback response"},
+						FinishReason: "stop",
+					},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		// Streaming response
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Error("ResponseWriter does not support flushing")
+			return
+		}
+
+		for _, chunk := range chunks {
+			fmt.Fprintf(w, "data: %s\n\n", chunk)
+			flusher.Flush()
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+}
+
+func TestSoul_ProcessWithLLM_StreamingEnabled(t *testing.T) {
+	chunks := []string{
+		`{"id":"1","choices":[{"delta":{"content":"Hello"}}]}`,
+		`{"id":"2","choices":[{"delta":{"content":" from"}}]}`,
+		`{"id":"3","choices":[{"delta":{"content":" streaming!"}}]}`,
+	}
+	server := mockStreamingLLMServer(t, chunks)
+	defer server.Close()
+
+	s := setupSoul(t, server)
+	// Disable tools to enable streaming
+	s.runtime.Tools = tools.NewToolSet()
+
+	var receivedContents []string
+	var streamChunks []string
+
+	s.OnMessage = func(msg wire.Message) {
+		if msg.Type == wire.MessageTypeAssistant {
+			for _, part := range msg.Content {
+				if part.Type == "text" {
+					receivedContents = append(receivedContents, part.Text)
+				}
+			}
+		}
+	}
+	s.OnStreamChunk = func(chunk string) {
+		streamChunks = append(streamChunks, chunk)
+	}
+
+	userMsg := testMsg(wire.MessageTypeUserInput, "hello")
+	err := s.processWithLLM(context.Background(), userMsg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should have received multiple updates as streaming progresses
+	if len(receivedContents) == 0 {
+		t.Error("expected at least one message update during streaming")
+	}
+
+	// Final content should be the complete message
+	finalContent := receivedContents[len(receivedContents)-1]
+	if finalContent != "Hello from streaming!" {
+		t.Errorf("expected 'Hello from streaming!', got %q", finalContent)
+	}
+
+	// Stream chunks should have been received
+	if len(streamChunks) == 0 {
+		t.Error("expected stream chunks to be received")
+	}
+}
+
+func TestSoul_ProcessWithLLM_StreamingDisabled(t *testing.T) {
+	server := mockLLMServer(t, []llm.ChatResponse{
+		textResponse("Non-streaming response"),
+	})
+	defer server.Close()
+
+	s := setupSoul(t, server)
+	s.runtime.UseStreaming = false
+
+	var received []wire.Message
+	s.OnMessage = func(msg wire.Message) {
+		received = append(received, msg)
+	}
+
+	userMsg := testMsg(wire.MessageTypeUserInput, "hello")
+	err := s.processWithLLM(context.Background(), userMsg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(received) != 1 {
+		t.Fatalf("expected 1 message in non-streaming mode, got %d", len(received))
+	}
+	if received[0].Content[0].Text != "Non-streaming response" {
+		t.Errorf("expected 'Non-streaming response', got %q", received[0].Content[0].Text)
+	}
+}
+
+func TestSoul_ProcessWithLLM_StreamingWithTools(t *testing.T) {
+	// When tools are registered, streaming should be disabled (fallback to non-streaming)
+	server := mockLLMServer(t, []llm.ChatResponse{
+		textResponse("Response with tools available"),
+	})
+	defer server.Close()
+
+	s := setupSoul(t, server)
+	// Tools are already registered by setupSoul
+
+	var received []wire.Message
+	s.OnMessage = func(msg wire.Message) {
+		received = append(received, msg)
+	}
+
+	userMsg := testMsg(wire.MessageTypeUserInput, "hello")
+	err := s.processWithLLM(context.Background(), userMsg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(received) != 1 {
+		t.Fatalf("expected 1 message when tools are registered, got %d", len(received))
+	}
+	if received[0].Content[0].Text != "Response with tools available" {
+		t.Errorf("unexpected response: %q", received[0].Content[0].Text)
+	}
+}
+
+func TestSoul_Runtime_UseStreaming(t *testing.T) {
+	rt := NewRuntime(t.TempDir(), false)
+	if !rt.UseStreaming {
+		t.Error("UseStreaming should be true by default")
+	}
+
+	rt2 := NewRuntime(t.TempDir(), false)
+	rt2.UseStreaming = false
+	if rt2.UseStreaming {
+		t.Error("UseStreaming should be settable to false")
+	}
+}
