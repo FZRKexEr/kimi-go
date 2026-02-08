@@ -771,3 +771,244 @@ func TestSoul_LLMHistory_Accumulates(t *testing.T) {
 		t.Errorf("expected 4 history entries, got %d", len(s.llmHistory))
 	}
 }
+
+// --- Parallel tool execution tests ---
+
+func TestSoul_ExecuteToolCallsParallel_MultipleTools(t *testing.T) {
+	// Helper to create a response with multiple tool calls
+	multiToolResponse := func() llm.ChatResponse {
+		return llm.ChatResponse{
+			ID:    "resp-multi",
+			Model: "test",
+			Choices: []struct {
+				Index        int         `json:"index"`
+				Message      llm.Message `json:"message"`
+				Delta        llm.Message `json:"delta"`
+				FinishReason string      `json:"finish_reason"`
+			}{
+				{
+					Index: 0,
+					Message: llm.Message{
+						Role: "assistant",
+						ToolCalls: []llm.ToolCallInfo{
+							{
+								ID:   "call_1",
+								Type: "function",
+								Function: llm.FunctionCall{
+									Name:      "shell",
+									Arguments: `{"command":"echo first"}`,
+								},
+							},
+							{
+								ID:   "call_2",
+								Type: "function",
+								Function: llm.FunctionCall{
+									Name:      "shell",
+									Arguments: `{"command":"echo second"}`,
+								},
+							},
+							{
+								ID:   "call_3",
+								Type: "function",
+								Function: llm.FunctionCall{
+									Name:      "shell",
+									Arguments: `{"command":"echo third"}`,
+								},
+							},
+						},
+					},
+					FinishReason: "tool_calls",
+				},
+			},
+		}
+	}
+
+	server := mockLLMServer(t, []llm.ChatResponse{
+		multiToolResponse(),
+		textResponse("All tools executed"),
+	})
+	defer server.Close()
+
+	s := setupSoul(t, server)
+
+	var toolCalls []tools.ToolCall
+	var toolResults []tools.ToolResult
+	var mu sync.Mutex
+
+	s.OnMessage = func(msg wire.Message) {}
+	s.OnToolCall = func(tc tools.ToolCall) {
+		mu.Lock()
+		toolCalls = append(toolCalls, tc)
+		mu.Unlock()
+	}
+	s.OnToolResult = func(tr tools.ToolResult) {
+		mu.Lock()
+		toolResults = append(toolResults, tr)
+		mu.Unlock()
+	}
+
+	userMsg := testMsg(wire.MessageTypeUserInput, "run multiple commands")
+	err := s.processWithLLM(context.Background(), userMsg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should have 3 tool calls
+	if len(toolCalls) != 3 {
+		t.Errorf("expected 3 tool calls, got %d", len(toolCalls))
+	}
+
+	// Should have 3 tool results
+	if len(toolResults) != 3 {
+		t.Errorf("expected 3 tool results, got %d", len(toolResults))
+	}
+
+	// Results should be in order (call_1, call_2, call_3)
+	expectedOrder := []string{"call_1", "call_2", "call_3"}
+	for i, result := range toolResults {
+		if result.CallID != expectedOrder[i] {
+			t.Errorf("expected result %d to have CallID %q, got %q", i, expectedOrder[i], result.CallID)
+		}
+		if !result.Success {
+			t.Errorf("tool %s should succeed: %s", result.CallID, result.Error)
+		}
+	}
+}
+
+func TestSoul_ExecuteToolCallsParallel_PartialFailure(t *testing.T) {
+	// Helper to create a response with multiple tool calls including a non-existent tool
+	mixedToolResponse := func() llm.ChatResponse {
+		return llm.ChatResponse{
+			ID:    "resp-mixed",
+			Model: "test",
+			Choices: []struct {
+				Index        int         `json:"index"`
+				Message      llm.Message `json:"message"`
+				Delta        llm.Message `json:"delta"`
+				FinishReason string      `json:"finish_reason"`
+			}{
+				{
+					Index: 0,
+					Message: llm.Message{
+						Role: "assistant",
+						ToolCalls: []llm.ToolCallInfo{
+							{
+								ID:   "call_1",
+								Type: "function",
+								Function: llm.FunctionCall{
+									Name:      "shell",
+									Arguments: `{"command":"echo success"}`,
+								},
+							},
+							{
+								ID:   "call_2",
+								Type: "function",
+								Function: llm.FunctionCall{
+									Name:      "nonexistent_tool",
+									Arguments: `{}`,
+								},
+							},
+							{
+								ID:   "call_3",
+								Type: "function",
+								Function: llm.FunctionCall{
+									Name:      "shell",
+									Arguments: `{"command":"echo still works"}`,
+								},
+							},
+						},
+					},
+					FinishReason: "tool_calls",
+				},
+			},
+		}
+	}
+
+	server := mockLLMServer(t, []llm.ChatResponse{
+		mixedToolResponse(),
+		textResponse("Done"),
+	})
+	defer server.Close()
+
+	s := setupSoul(t, server)
+
+	var toolResults []tools.ToolResult
+	s.OnMessage = func(msg wire.Message) {}
+	s.OnToolCall = func(tc tools.ToolCall) {}
+	s.OnToolResult = func(tr tools.ToolResult) {
+		toolResults = append(toolResults, tr)
+	}
+
+	err := s.processWithLLM(context.Background(), testMsg(wire.MessageTypeUserInput, "test"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should have 3 results in order
+	if len(toolResults) != 3 {
+		t.Fatalf("expected 3 tool results, got %d", len(toolResults))
+	}
+
+	// First should succeed
+	if !toolResults[0].Success {
+		t.Error("first tool should succeed")
+	}
+
+	// Second should fail (tool not found)
+	if toolResults[1].Success {
+		t.Error("second tool should fail")
+	}
+	if toolResults[1].Error == "" {
+		t.Error("second tool should have error message")
+	}
+
+	// Third should succeed (failure of second doesn't affect third)
+	if !toolResults[2].Success {
+		t.Errorf("third tool should succeed despite second failing: %s", toolResults[2].Error)
+	}
+}
+
+func TestSoul_ExecuteToolCallsParallel_Empty(t *testing.T) {
+	rt := NewRuntime(t.TempDir(), false)
+	agent := NewAgent("test", "", rt)
+	ctx := NewContext("")
+	s := NewSoul(agent, ctx)
+
+	// Empty tool calls should return empty results
+	results := s.executeToolCallsParallel(context.Background(), nil)
+	if len(results) != 0 {
+		t.Errorf("expected 0 results for empty tool calls, got %d", len(results))
+	}
+}
+
+func TestSoul_ExecuteToolCallsParallel_SingleTool(t *testing.T) {
+	rt := NewRuntime(t.TempDir(), false)
+	rt.RegisterTool(tools.NewShellTool(rt.WorkDir, 5*time.Second))
+
+	agent := NewAgent("test", "", rt)
+	ctx := NewContext("")
+	s := NewSoul(agent, ctx)
+
+	toolCalls := []llm.ToolCallInfo{
+		{
+			ID:   "call_1",
+			Type: "function",
+			Function: llm.FunctionCall{
+				Name:      "shell",
+				Arguments: `{"command":"echo single"}`,
+			},
+		},
+	}
+
+	results := s.executeToolCallsParallel(context.Background(), toolCalls)
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].CallID != "call_1" {
+		t.Errorf("expected CallID 'call_1', got %q", results[0].CallID)
+	}
+	if !results[0].Success {
+		t.Errorf("tool should succeed: %s", results[0].Error)
+	}
+}
