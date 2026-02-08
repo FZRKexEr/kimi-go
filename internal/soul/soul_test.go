@@ -1012,3 +1012,107 @@ func TestSoul_ExecuteToolCallsParallel_SingleTool(t *testing.T) {
 		t.Errorf("tool should succeed: %s", results[0].Error)
 	}
 }
+		if msg.Type == wire.MessageTypeAssistant {
+			for _, part := range msg.Content {
+				if part.Type == "text" {
+					receivedContents = append(receivedContents, part.Text)
+				}
+			}
+		}
+	}
+	s.OnStreamChunk = func(chunk string) {
+		streamChunks = append(streamChunks, chunk)
+	}
+
+	userMsg := testMsg(wire.MessageTypeUserInput, "hello")
+	err := s.processWithLLM(context.Background(), userMsg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should have received multiple updates as streaming progresses
+	if len(receivedContents) == 0 {
+		t.Error("expected at least one message update during streaming")
+	}
+
+	// Final content should be the complete message
+	finalContent := receivedContents[len(receivedContents)-1]
+	if finalContent != "Hello from streaming!" {
+		t.Errorf("expected 'Hello from streaming!', got %q", finalContent)
+	}
+
+	// Stream chunks should have been received
+	if len(streamChunks) == 0 {
+		t.Error("expected stream chunks to be received")
+	}
+}
+
+func TestSoul_ProcessWithLLM_StreamingDisabled(t *testing.T) {
+	server := mockLLMServer(t, []llm.ChatResponse{
+		textResponse("Non-streaming response"),
+	})
+	defer server.Close()
+
+	s := setupSoul(t, server)
+	s.runtime.UseStreaming = false
+
+	var received []wire.Message
+	s.OnMessage = func(msg wire.Message) {
+		received = append(received, msg)
+	}
+
+	userMsg := testMsg(wire.MessageTypeUserInput, "hello")
+	err := s.processWithLLM(context.Background(), userMsg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(received) != 1 {
+		t.Fatalf("expected 1 message in non-streaming mode, got %d", len(received))
+	}
+	if received[0].Content[0].Text != "Non-streaming response" {
+		t.Errorf("expected 'Non-streaming response', got %q", received[0].Content[0].Text)
+	}
+}
+
+func TestSoul_ProcessWithLLM_StreamingWithTools(t *testing.T) {
+	// When tools are registered, streaming should be disabled (fallback to non-streaming)
+	server := mockLLMServer(t, []llm.ChatResponse{
+		textResponse("Response with tools available"),
+	})
+	defer server.Close()
+
+	s := setupSoul(t, server)
+	// Tools are already registered by setupSoul
+
+	var received []wire.Message
+	s.OnMessage = func(msg wire.Message) {
+		received = append(received, msg)
+	}
+
+	userMsg := testMsg(wire.MessageTypeUserInput, "hello")
+	err := s.processWithLLM(context.Background(), userMsg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(received) != 1 {
+		t.Fatalf("expected 1 message when tools are registered, got %d", len(received))
+	}
+	if received[0].Content[0].Text != "Response with tools available" {
+		t.Errorf("unexpected response: %q", received[0].Content[0].Text)
+	}
+}
+
+func TestSoul_Runtime_UseStreaming(t *testing.T) {
+	rt := NewRuntime(t.TempDir(), false)
+	if !rt.UseStreaming {
+		t.Error("UseStreaming should be true by default")
+	}
+
+	rt2 := NewRuntime(t.TempDir(), false)
+	rt2.UseStreaming = false
+	if rt2.UseStreaming {
+		t.Error("UseStreaming should be settable to false")
+	}
+}
