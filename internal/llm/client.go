@@ -126,6 +126,12 @@ func (c *Client) Chat(ctx context.Context, messages []Message) (*ChatResponse, e
 	return c.ChatWithTools(ctx, messages, nil)
 }
 
+// Ensure Client implements the interface
+var _ interface {
+	Chat(ctx context.Context, messages []Message) (*ChatResponse, error)
+	ChatWithTools(ctx context.Context, messages []Message, tools []ToolDef) (*ChatResponse, error)
+} = (*Client)(nil)
+
 // ChatStream sends a streaming chat completion request.
 func (c *Client) ChatStream(ctx context.Context, messages []Message) (<-chan ChatResponse, <-chan error) {
 	responseChan := make(chan ChatResponse)
@@ -172,7 +178,11 @@ func (c *Client) sendRequest(ctx context.Context, reqBody ChatRequest) (*ChatRes
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error: %s - %s", resp.Status, string(body))
+		return nil, &APIError{
+			StatusCode: resp.StatusCode,
+			Message:    string(body),
+			RawBody:    string(body),
+		}
 	}
 
 	var chatResp ChatResponse
@@ -207,7 +217,11 @@ func (c *Client) sendStreamRequest(ctx context.Context, reqBody ChatRequest, res
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API error: %s - %s", resp.Status, string(body))
+		return &APIError{
+			StatusCode: resp.StatusCode,
+			Message:    string(body),
+			RawBody:    string(body),
+		}
 	}
 
 	// Read SSE stream

@@ -13,12 +13,18 @@ import (
 	"kimi-go/internal/wire"
 )
 
+// LLMClient 定义 LLM 客户端接口
+type LLMClient interface {
+	Chat(ctx context.Context, messages []llm.Message) (*llm.ChatResponse, error)
+	ChatWithTools(ctx context.Context, messages []llm.Message, tools []llm.ToolDef) (*llm.ChatResponse, error)
+}
+
 // Runtime provides the execution environment for the agent.
 type Runtime struct {
 	WorkDir    string
 	Config     map[string]any
 	Tools      *tools.ToolSet
-	LLMClient  *llm.Client
+	LLMClient  LLMClient
 	YOLO       bool // Auto-approve mode
 	MaxSteps   int
 	MaxRetries int

@@ -50,6 +50,9 @@ type ProviderConfig struct {
 
 	// Custom headers to add to requests
 	Headers map[string]string `toml:"headers,omitempty"`
+	
+	// Retry configuration for this provider
+	Retry *RetryConfig `toml:"retry,omitempty"`
 }
 
 // GetAPIKey retrieves the API key. It checks the direct APIKey field first,
@@ -80,6 +83,15 @@ type LoopControl struct {
 	MaxRetriesPerStep   int `toml:"max_retries_per_step"`
 	MaxRalphIterations  int `toml:"max_ralph_iterations"`
 	ReservedContextSize int `toml:"reserved_context_size"`
+}
+
+// RetryConfig contains retry strategy configuration for LLM requests.
+type RetryConfig struct {
+	MaxRetries       int `toml:"max_retries"`         // 最大重试次数，默认 3
+	InitialWaitMs    int `toml:"initial_wait_ms"`     // 初始等待时间（毫秒），默认 300
+	MaxWaitMs        int `toml:"max_wait_ms"`         // 最大等待时间（毫秒），默认 5000
+	ExponentialBase  float64 `toml:"exponential_base"`  // 指数基数，默认 2.0
+	JitterMs         int `toml:"jitter_ms"`           // 抖动范围（毫秒），默认 500
 }
 
 // DefaultConfig returns a default configuration.
