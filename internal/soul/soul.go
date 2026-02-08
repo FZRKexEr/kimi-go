@@ -84,6 +84,11 @@ type Soul struct {
 	// LLM conversation history (separate from wire context)
 	llmHistory []llm.Message
 
+	// Token tracking
+	tokenCount        int
+	maxContextSize    int
+	reservedContext   int
+
 	// DoneCh is closed after each message is fully processed
 	DoneCh chan struct{}
 
@@ -97,13 +102,15 @@ type Soul struct {
 // NewSoul creates a new Soul instance.
 func NewSoul(agent *Agent, ctx *Context) *Soul {
 	return &Soul{
-		Agent:      agent,
-		Context:    ctx,
-		runtime:    agent.Runtime,
-		cancelCh:   make(chan struct{}),
-		msgCh:      make(chan wire.Message, 100),
-		llmHistory: make([]llm.Message, 0),
-		DoneCh:     make(chan struct{}, 1),
+		Agent:           agent,
+		Context:         ctx,
+		runtime:         agent.Runtime,
+		cancelCh:        make(chan struct{}),
+		msgCh:           make(chan wire.Message, 100),
+		llmHistory:      make([]llm.Message, 0),
+		DoneCh:          make(chan struct{}, 1),
+		maxContextSize:  128000, // Default max context size
+		reservedContext: 8192,   // Reserved tokens for response
 	}
 }
 
@@ -223,6 +230,11 @@ func (s *Soul) processWithLLM(ctx context.Context, userMsg wire.Message) error {
 		Content: userText,
 	})
 
+	// Check if we need to compress context before calling LLM
+	if err := s.maybeCompressHistory(ctx, client); err != nil {
+		return fmt.Errorf("failed to compress history: %w", err)
+	}
+
 	// Build full message list with system prompt
 	messages := s.buildLLMMessages()
 
@@ -235,6 +247,9 @@ func (s *Soul) processWithLLM(ctx context.Context, userMsg wire.Message) error {
 		if err != nil {
 			return fmt.Errorf("LLM request failed: %w", err)
 		}
+
+		// Update token count from API response
+		s.updateTokenCount(resp)
 
 		if len(resp.Choices) == 0 {
 			return fmt.Errorf("LLM returned no choices")
@@ -427,4 +442,103 @@ func extractText(msg wire.Message) string {
 		}
 	}
 	return ""
+}
+
+// updateTokenCount updates the token count from API response.
+func (s *Soul) updateTokenCount(resp *llm.ChatResponse) {
+	if resp.Usage.TotalTokens > 0 {
+		s.tokenCount = resp.Usage.TotalTokens
+	}
+}
+
+// shouldCompress checks if context compression is needed.
+func (s *Soul) shouldCompress() bool {
+	return s.tokenCount+s.reservedContext >= s.maxContextSize
+}
+
+// maybeCompressHistory compresses history if token count is approaching limit.
+// It keeps the system message and last 2 messages, summarizes the rest.
+func (s *Soul) maybeCompressHistory(ctx context.Context, client LLMClient) error {
+	if !s.shouldCompress() {
+		return nil
+	}
+
+	// Need at least 4 messages to compress (to keep 2)
+	if len(s.llmHistory) <= 4 {
+		return nil
+	}
+
+	// Split history: keep last 2 messages, summarize the rest
+	keepCount := 2
+	toSummarize := s.llmHistory[:len(s.llmHistory)-keepCount]
+	keepMessages := s.llmHistory[len(s.llmHistory)-keepCount:]
+
+	// Build summary prompt
+	summaryPrompt := "Summarize the following conversation history concisely, preserving key information, decisions, and context:\n\n"
+	for _, msg := range toSummarize {
+		summaryPrompt += fmt.Sprintf("%s: %s\n", msg.Role, msg.Content)
+	}
+
+	summaryMessages := []llm.Message{
+		{Role: "system", Content: "You are a helpful assistant that summarizes conversation history."},
+		{Role: "user", Content: summaryPrompt},
+	}
+
+	summaryResp, err := client.Chat(ctx, summaryMessages)
+	if err != nil {
+		return fmt.Errorf("failed to generate summary: %w", err)
+	}
+
+	if len(summaryResp.Choices) == 0 {
+		return fmt.Errorf("summary generation returned no choices")
+	}
+
+	summary := summaryResp.Choices[0].Message.Content
+
+	// Rebuild history with summary and kept messages
+	newHistory := make([]llm.Message, 0, len(keepMessages)+1)
+	newHistory = append(newHistory, llm.Message{
+		Role:    "system",
+		Content: fmt.Sprintf("Previous conversation summary: %s", summary),
+	})
+	newHistory = append(newHistory, keepMessages...)
+
+	s.llmHistory = newHistory
+
+	// Reset token count estimate (summary + kept messages)
+	s.tokenCount = estimateTokens(summary) + estimateMessagesTokens(keepMessages)
+
+	return nil
+}
+
+// estimateTokens provides a rough token estimate for text.
+// This is a simple approximation: ~4 characters per token on average.
+func estimateTokens(text string) int {
+	return len(text) / 4
+}
+
+// estimateMessagesTokens estimates tokens for a list of messages.
+func estimateMessagesTokens(messages []llm.Message) int {
+	total := 0
+	for _, msg := range messages {
+		total += estimateTokens(msg.Content)
+		// Add overhead for message structure
+		total += 4
+	}
+	return total
+}
+
+// SetMaxContextSize sets the maximum context size for compression.
+func (s *Soul) SetMaxContextSize(size int) {
+	s.maxContextSize = size
+}
+
+// SetReservedContext sets the reserved context size.
+func (s *Soul) SetReservedContext(size int) {
+	s.reservedContext = size
+}
+
+// GetTokenCount returns the current token count.
+func (s *Soul) GetTokenCount() int {
+	return s.tokenCount
 }

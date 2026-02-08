@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -769,5 +770,278 @@ func TestSoul_LLMHistory_Accumulates(t *testing.T) {
 	// LLM history should have: user1, assistant1, user2, assistant2
 	if len(s.llmHistory) != 4 {
 		t.Errorf("expected 4 history entries, got %d", len(s.llmHistory))
+	}
+}
+
+// --- Token tracking and compression tests ---
+
+func TestSoul_UpdateTokenCount(t *testing.T) {
+	rt := NewRuntime(t.TempDir(), false)
+	agent := NewAgent("test", "", rt)
+	ctx := NewContext("")
+	s := NewSoul(agent, ctx)
+
+	resp := &llm.ChatResponse{}
+	resp.Usage.TotalTokens = 1500
+
+	s.updateTokenCount(resp)
+
+	if s.tokenCount != 1500 {
+		t.Errorf("expected token count 1500, got %d", s.tokenCount)
+	}
+}
+
+func TestSoul_ShouldCompress(t *testing.T) {
+	rt := NewRuntime(t.TempDir(), false)
+	agent := NewAgent("test", "", rt)
+	ctx := NewContext("")
+	s := NewSoul(agent, ctx)
+
+	// Set small context size for testing
+	s.SetMaxContextSize(10000)
+	s.SetReservedContext(1000)
+
+	// Should not compress when under limit
+	s.tokenCount = 8000
+	if s.shouldCompress() {
+		t.Error("should not compress when under limit")
+	}
+
+	// Should compress when at limit
+	s.tokenCount = 9000
+	if !s.shouldCompress() {
+		t.Error("should compress when at limit")
+	}
+
+	// Should compress when over limit
+	s.tokenCount = 9500
+	if !s.shouldCompress() {
+		t.Error("should compress when over limit")
+	}
+}
+
+func TestSoul_MaybeCompressHistory(t *testing.T) {
+	// Mock server that returns a summary response
+	server := mockLLMServer(t, []llm.ChatResponse{
+		textResponse("Summary of conversation"),
+	})
+	defer server.Close()
+
+	rt := NewRuntime(t.TempDir(), false)
+	rt.LLMClient = llm.NewClient(llm.Config{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+		Model:   "test-model",
+		Timeout: 10 * time.Second,
+	})
+	agent := NewAgent("test", "", rt)
+	ctx := NewContext("")
+	s := NewSoul(agent, ctx)
+
+	// Set small context size to trigger compression
+	s.SetMaxContextSize(100)
+	s.SetReservedContext(10)
+	s.tokenCount = 95 // Above threshold
+
+	// Add 6 messages to history (more than 4 to trigger compression)
+	s.llmHistory = []llm.Message{
+		{Role: "user", Content: "msg1"},
+		{Role: "assistant", Content: "resp1"},
+		{Role: "user", Content: "msg2"},
+		{Role: "assistant", Content: "resp2"},
+		{Role: "user", Content: "msg3"},
+		{Role: "assistant", Content: "resp3"},
+	}
+
+	err := s.maybeCompressHistory(context.Background(), rt.LLMClient)
+	if err != nil {
+		t.Fatalf("compression failed: %v", err)
+	}
+
+	// After compression: summary + last 2 messages
+	if len(s.llmHistory) != 3 {
+		t.Errorf("expected 3 history entries (summary + 2 kept), got %d", len(s.llmHistory))
+	}
+
+	// First message should be the summary
+	if s.llmHistory[0].Role != "system" {
+		t.Errorf("first message should be system summary, got %s", s.llmHistory[0].Role)
+	}
+	if !strings.Contains(s.llmHistory[0].Content, "Summary of conversation") {
+		t.Errorf("unexpected summary content: %s", s.llmHistory[0].Content)
+	}
+
+	// Last 2 messages should be preserved
+	if s.llmHistory[1].Content != "msg3" {
+		t.Errorf("second message should be 'msg3', got %s", s.llmHistory[1].Content)
+	}
+	if s.llmHistory[2].Content != "resp3" {
+		t.Errorf("third message should be 'resp3', got %s", s.llmHistory[2].Content)
+	}
+}
+
+func TestSoul_MaybeCompressHistory_NotNeeded(t *testing.T) {
+	rt := NewRuntime(t.TempDir(), false)
+	agent := NewAgent("test", "", rt)
+	ctx := NewContext("")
+	s := NewSoul(agent, ctx)
+
+	// Set token count below threshold
+	s.SetMaxContextSize(10000)
+	s.SetReservedContext(1000)
+	s.tokenCount = 1000
+
+	// Add some messages
+	s.llmHistory = []llm.Message{
+		{Role: "user", Content: "msg1"},
+		{Role: "assistant", Content: "resp1"},
+	}
+
+	// Should not compress when under limit
+	err := s.maybeCompressHistory(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("should not error when not compressing: %v", err)
+	}
+
+	// History should remain unchanged
+	if len(s.llmHistory) != 2 {
+		t.Errorf("expected 2 history entries, got %d", len(s.llmHistory))
+	}
+}
+
+func TestSoul_MaybeCompressHistory_TooFewMessages(t *testing.T) {
+	server := mockLLMServer(t, []llm.ChatResponse{
+		textResponse("Summary"),
+	})
+	defer server.Close()
+
+	rt := NewRuntime(t.TempDir(), false)
+	rt.LLMClient = llm.NewClient(llm.Config{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+		Model:   "test-model",
+		Timeout: 10 * time.Second,
+	})
+	agent := NewAgent("test", "", rt)
+	ctx := NewContext("")
+	s := NewSoul(agent, ctx)
+
+	// Set small context size to trigger compression
+	s.SetMaxContextSize(100)
+	s.SetReservedContext(10)
+	s.tokenCount = 95
+
+	// Add only 3 messages (less than 4, should not compress)
+	s.llmHistory = []llm.Message{
+		{Role: "user", Content: "msg1"},
+		{Role: "assistant", Content: "resp1"},
+		{Role: "user", Content: "msg2"},
+	}
+
+	err := s.maybeCompressHistory(context.Background(), rt.LLMClient)
+	if err != nil {
+		t.Fatalf("should not error: %v", err)
+	}
+
+	// History should remain unchanged (too few messages)
+	if len(s.llmHistory) != 3 {
+		t.Errorf("expected 3 history entries, got %d", len(s.llmHistory))
+	}
+}
+
+func TestSoul_GetTokenCount(t *testing.T) {
+	rt := NewRuntime(t.TempDir(), false)
+	agent := NewAgent("test", "", rt)
+	ctx := NewContext("")
+	s := NewSoul(agent, ctx)
+
+	if s.GetTokenCount() != 0 {
+		t.Errorf("expected initial token count 0, got %d", s.GetTokenCount())
+	}
+
+	s.tokenCount = 500
+	if s.GetTokenCount() != 500 {
+		t.Errorf("expected token count 500, got %d", s.GetTokenCount())
+	}
+}
+
+func TestEstimateTokens(t *testing.T) {
+	// ~4 characters per token
+	tests := []struct {
+		text     string
+		expected int
+	}{
+		{"", 0},
+		{"abcd", 1},
+		{"abcdefghijklmnop", 4},
+		{"This is a longer text that should be estimated correctly.", 14},
+	}
+
+	for _, tt := range tests {
+		got := estimateTokens(tt.text)
+		if got != tt.expected {
+			t.Errorf("estimateTokens(%q) = %d, want %d", tt.text, got, tt.expected)
+		}
+	}
+}
+
+func TestEstimateMessagesTokens(t *testing.T) {
+	messages := []llm.Message{
+		{Role: "user", Content: "hello"},
+		{Role: "assistant", Content: "world"},
+	}
+
+	// Each message: content tokens + 4 overhead
+	// "hello" = 1 token, "world" = 1 token
+	// Total = 1 + 4 + 1 + 4 = 10
+	got := estimateMessagesTokens(messages)
+	expected := 10
+	if got != expected {
+		t.Errorf("estimateMessagesTokens() = %d, want %d", got, expected)
+	}
+}
+
+func TestSoul_ProcessWithLLM_TokenTracking(t *testing.T) {
+	server := mockLLMServer(t, []llm.ChatResponse{
+		{
+			ID:    "resp-1",
+			Model: "test",
+			Choices: []struct {
+				Index        int         `json:"index"`
+				Message      llm.Message `json:"message"`
+				Delta        llm.Message `json:"delta"`
+				FinishReason string      `json:"finish_reason"`
+			}{
+				{
+					Index:        0,
+					Message:      llm.Message{Role: "assistant", Content: "Hello!"},
+					FinishReason: "stop",
+				},
+			},
+			Usage: struct {
+				PromptTokens     int `json:"prompt_tokens"`
+				CompletionTokens int `json:"completion_tokens"`
+				TotalTokens      int `json:"total_tokens"`
+			}{
+				PromptTokens:     100,
+				CompletionTokens: 50,
+				TotalTokens:      150,
+			},
+		},
+	})
+	defer server.Close()
+
+	s := setupSoul(t, server)
+	s.OnMessage = func(msg wire.Message) {}
+
+	userMsg := testMsg(wire.MessageTypeUserInput, "hello")
+	err := s.processWithLLM(context.Background(), userMsg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Token count should be updated from API response
+	if s.tokenCount != 150 {
+		t.Errorf("expected token count 150, got %d", s.tokenCount)
 	}
 }
