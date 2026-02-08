@@ -44,5 +44,9 @@ test_output.log
 /kimi_test
 /main
 
+# Local env files with secrets
+scripts/env.local.sh
+*.local.sh
+
 # Benchmark results
 benchmark_results/
