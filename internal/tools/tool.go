@@ -124,29 +124,32 @@ func (tr *ToolResult) TruncateForLLM() *ToolResult {
 	return truncated
 }
 
-// truncateText applies line-by-line and total character limits.
+// truncateText applies line-by-line and total rune limits.
+// It properly handles UTF-8 by counting runes instead of bytes.
 func truncateText(text string, maxTotal, maxLine int) string {
-	if len(text) <= maxTotal && maxLine <= 0 {
+	// Convert to runes for proper UTF-8 handling
+	runes := []rune(text)
+	if len(runes) <= maxTotal && maxLine <= 0 {
 		return text
 	}
 
-	var result []byte
+	var result []rune
 	totalLen := 0
 	lineStart := 0
 	truncated := false
 
-	for i := 0; i <= len(text); i++ {
+	for i := 0; i <= len(runes); i++ {
 		// Check for line end or end of text
-		if i == len(text) || text[i] == '\n' {
-			line := text[lineStart:i]
+		if i == len(runes) || runes[i] == '\n' {
+			line := runes[lineStart:i]
 			lineEnd := i
-			if i < len(text) {
+			if i < len(runes) {
 				lineEnd++ // Include the newline
 			}
 
-			// Check if adding this line would exceed total limit
+			// Check if adding this line would exceed total limit (in runes)
 			lineLen := len(line)
-			if lineLen > maxLine {
+			if maxLine > 0 && lineLen > maxLine {
 				// Truncate this line
 				lineLen = maxLine
 				truncated = true
@@ -164,25 +167,23 @@ func truncateText(text string, maxTotal, maxLine int) string {
 			}
 
 			// Add the (possibly truncated) line
-			if len(line) > maxLine {
+			if maxLine > 0 && len(line) > maxLine {
 				result = append(result, line[:maxLine]...)
-				if i < len(text) {
+				if i < len(runes) {
 					result = append(result, '\n')
+					totalLen++ // Account for newline
 				}
 			} else {
-				result = append(result, text[lineStart:lineEnd]...)
+				result = append(result, runes[lineStart:lineEnd]...)
 			}
 			totalLen += lineLen
-			if i < len(text) && len(line) <= maxLine {
-				totalLen++ // for newline
-			}
 
 			lineStart = i + 1
 		}
 	}
 
 	if truncated {
-		result = append(result, "\n... (output truncated)"...)
+		result = append(result, []rune("\n... (output truncated)")...)
 	}
 
 	return string(result)

@@ -369,10 +369,17 @@ func TestTruncateForLLM(t *testing.T) {
 				}
 			}
 
-			// Verify original is not modified
-			if len(tt.result.Result) > MaxToolOutputTotalChars+100 {
-				if len(tt.result.Result) != MaxToolOutputTotalChars+100 {
-					t.Error("Original result was modified")
+			// Verify original is not modified by comparing with expected original length
+			if tt.name == "long result - truncated" {
+				expectedLen := MaxToolOutputTotalChars + 100
+				if len(tt.result.Result) != expectedLen {
+					t.Errorf("Original result was modified: got len %d, want %d", len(tt.result.Result), expectedLen)
+				}
+			}
+			if tt.name == "error result - truncated" {
+				expectedLen := MaxToolOutputTotalChars + 100
+				if len(tt.result.Error) != expectedLen {
+					t.Errorf("Original error was modified: got len %d, want %d", len(tt.result.Error), expectedLen)
 				}
 			}
 		})
