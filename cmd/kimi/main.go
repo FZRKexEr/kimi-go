@@ -26,6 +26,28 @@ import (
 	"kimi-go/internal/wire"
 )
 
+// defaultLogger 是默认的日志实现
+type defaultLogger struct{}
+
+func (l *defaultLogger) Debug(format string, args ...interface{}) {
+	// Debug 日志在静默模式下不输出
+	// 可以通过设置环境变量 KIMI_DEBUG=1 来开启
+	if os.Getenv("KIMI_DEBUG") == "1" {
+		fmt.Fprintf(os.Stderr, "[DEBUG] "+format+"\n", args...)
+	}
+}
+
+func (l *defaultLogger) Info(format string, args ...interface{}) {
+	// Info 日志只在交互模式下输出
+	if isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd()) {
+		fmt.Fprintf(os.Stderr, "[INFO] "+format+"\n", args...)
+	}
+}
+
+func (l *defaultLogger) Warn(format string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, "[WARN] "+format+"\n", args...)
+}
+
 // buildSystemPrompt generates a dynamic system prompt with runtime context.
 func buildSystemPrompt(workDir string) string {
 	var b strings.Builder
@@ -210,13 +232,28 @@ func main() {
 	}
 
 	if baseURL != "" && apiKey != "" && model != "" {
+		// 创建基础 LLM 客户端
 		llmClient := llm.NewClient(llm.Config{
 			BaseURL: baseURL,
 			APIKey:  apiKey,
 			Model:   model,
 		})
-		rt.LLMClient = llmClient
-		fmt.Printf("LLM: %s @ %s\n", model, baseURL)
+
+		// 创建带重试功能的客户端
+		var retryCfg *llm.RetryConfig
+		if provider, ok := cfg.GetDefaultProvider(); ok && provider.Retry != nil {
+			retryCfg = llm.RetryConfigFromProvider(&provider)
+		} else {
+			retryCfg = llm.DefaultRetryConfig()
+		}
+		// 从 LoopControl 覆盖最大重试次数
+		if cfg.LoopControl.MaxRetriesPerStep > 0 {
+			retryCfg.MaxRetries = cfg.LoopControl.MaxRetriesPerStep
+		}
+
+		retryClient := llm.NewRetryableClient(llmClient, retryCfg, &defaultLogger{})
+		rt.LLMClient = retryClient
+		fmt.Printf("LLM: %s @ %s (retries: %d)\n", model, baseURL, retryCfg.MaxRetries)
 	} else {
 		fmt.Println("Warning: LLM not configured. Set OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL env vars.")
 	}
