@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -457,14 +458,20 @@ func (s *Soul) shouldCompress() bool {
 }
 
 // maybeCompressHistory compresses history if token count is approaching limit.
-// It keeps the system message and last 2 messages, summarizes the rest.
+// It summarizes all but the last 2 messages and rebuilds llmHistory as a
+// system-level conversation summary followed by those kept messages.
 func (s *Soul) maybeCompressHistory(ctx context.Context, client LLMClient) error {
 	if !s.shouldCompress() {
 		return nil
 	}
 
-	// Need at least 4 messages to compress (to keep 2)
-	if len(s.llmHistory) <= 4 {
+	// Guard against nil client
+	if client == nil {
+		return fmt.Errorf("cannot compress history: LLM client is nil")
+	}
+
+	// Need at least 4 messages to compress (to keep 2 and summarize at least 2)
+	if len(s.llmHistory) < 4 {
 		return nil
 	}
 
@@ -473,15 +480,16 @@ func (s *Soul) maybeCompressHistory(ctx context.Context, client LLMClient) error
 	toSummarize := s.llmHistory[:len(s.llmHistory)-keepCount]
 	keepMessages := s.llmHistory[len(s.llmHistory)-keepCount:]
 
-	// Build summary prompt
-	summaryPrompt := "Summarize the following conversation history concisely, preserving key information, decisions, and context:\n\n"
+	// Build summary prompt using strings.Builder for efficiency
+	var summaryBuilder strings.Builder
+	summaryBuilder.WriteString("Summarize the following conversation history concisely, preserving key information, decisions, and context:\n\n")
 	for _, msg := range toSummarize {
-		summaryPrompt += fmt.Sprintf("%s: %s\n", msg.Role, msg.Content)
+		fmt.Fprintf(&summaryBuilder, "%s: %s\n", msg.Role, msg.Content)
 	}
 
 	summaryMessages := []llm.Message{
 		{Role: "system", Content: "You are a helpful assistant that summarizes conversation history."},
-		{Role: "user", Content: summaryPrompt},
+		{Role: "user", Content: summaryBuilder.String()},
 	}
 
 	summaryResp, err := client.Chat(ctx, summaryMessages)
@@ -505,16 +513,20 @@ func (s *Soul) maybeCompressHistory(ctx context.Context, client LLMClient) error
 
 	s.llmHistory = newHistory
 
-	// Reset token count estimate (summary + kept messages)
-	s.tokenCount = estimateTokens(summary) + estimateMessagesTokens(keepMessages)
+	// Reset token count estimate for the rebuilt history
+	s.tokenCount = estimateMessagesTokens(s.llmHistory)
 
 	return nil
 }
 
 // estimateTokens provides a rough token estimate for text.
 // This is a simple approximation: ~4 characters per token on average.
+// Uses ceiling division to avoid underestimating.
 func estimateTokens(text string) int {
-	return len(text) / 4
+	if len(text) == 0 {
+		return 0
+	}
+	return (len(text) + 3) / 4
 }
 
 // estimateMessagesTokens estimates tokens for a list of messages.
