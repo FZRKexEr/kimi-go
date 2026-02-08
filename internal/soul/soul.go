@@ -366,6 +366,7 @@ func (s *Soul) handleError(err error) {
 }
 
 // executeToolCallsParallel executes multiple tool calls in parallel and returns results in order.
+// Callbacks are emitted sequentially before starting goroutines to avoid data races.
 func (s *Soul) executeToolCallsParallel(ctx context.Context, toolCalls []llm.ToolCallInfo) []tools.ToolResult {
 	type indexedResult struct {
 		index  int
@@ -376,42 +377,57 @@ func (s *Soul) executeToolCallsParallel(ctx context.Context, toolCalls []llm.Too
 	resultCh := make(chan indexedResult, len(toolCalls))
 	var wg sync.WaitGroup
 
-	// Launch goroutines for each tool call
+	// Precompute tool calls and emit events sequentially to keep callbacks single-threaded
+	calls := make([]tools.ToolCall, len(toolCalls))
 	for i, tc := range toolCalls {
+		call := tools.ToolCall{
+			ID:        tc.ID,
+			Name:      tc.Function.Name,
+			Arguments: json.RawMessage(tc.Function.Arguments),
+		}
+		calls[i] = call
+
+		if s.OnToolCall != nil {
+			s.OnToolCall(call)
+		}
+
+		// Emit wire message for tool call display
+		tcMsg := wire.Message{
+			Type: wire.MessageTypeToolCall,
+			Content: []wire.ContentPart{{
+				Type: "text",
+				Text: fmt.Sprintf("Calling tool: %s(%s)", tc.Function.Name, tc.Function.Arguments),
+			}},
+			Timestamp: time.Now(),
+		}
+		s.Context.AddMessage(tcMsg)
+		if s.OnMessage != nil {
+			s.OnMessage(tcMsg)
+		}
+	}
+
+	// Execute tools concurrently, without invoking callbacks from goroutines
+	for i, call := range calls {
 		wg.Add(1)
-		go func(index int, toolCall llm.ToolCallInfo) {
+		go func(index int, c tools.ToolCall) {
 			defer wg.Done()
 
-			// Emit tool call event
-			call := tools.ToolCall{
-				ID:        toolCall.ID,
-				Name:      toolCall.Function.Name,
-				Arguments: json.RawMessage(toolCall.Function.Arguments),
-			}
-			if s.OnToolCall != nil {
-				s.OnToolCall(call)
-			}
-
-			// Emit wire message for tool call display
-			tcMsg := wire.Message{
-				Type: wire.MessageTypeToolCall,
-				Content: []wire.ContentPart{{
-					Type: "text",
-					Text: fmt.Sprintf("Calling tool: %s(%s)", toolCall.Function.Name, toolCall.Function.Arguments),
-				}},
-				Timestamp: time.Now(),
-			}
-			s.Context.AddMessage(tcMsg)
-			if s.OnMessage != nil {
-				s.OnMessage(tcMsg)
-			}
-
 			// Execute the tool
-			result, _ := s.executeToolCall(ctx, call)
+			result, err := s.executeToolCall(ctx, c)
+			if err != nil {
+				// Ensure a non-nil ToolResult is always sent
+				if result == nil {
+					result = &tools.ToolResult{
+						CallID:  c.ID,
+						Success: false,
+						Error:   err.Error(),
+					}
+				}
+			}
 
 			// Send result with index to maintain order
 			resultCh <- indexedResult{index: index, result: *result}
-		}(i, tc)
+		}(i, call)
 	}
 
 	// Close channel when all goroutines complete
