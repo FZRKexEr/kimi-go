@@ -9,9 +9,17 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"kimi-go/internal/approval"
 	"kimi-go/internal/soul"
 	"kimi-go/internal/wire"
 )
+
+// approvalState represents the current approval prompt state.
+type approvalState struct {
+	active      bool
+	request     *approval.ApprovalRequest
+	remember    bool // Whether to remember this approval for the session
+}
 
 // Model is the bubbletea model for the TUI.
 type Model struct {
@@ -29,6 +37,9 @@ type Model struct {
 	mdRenderer *markdownRenderer
 	width      int
 	height     int
+
+	// Approval state
+	approval approvalState
 }
 
 // NewModel creates a new TUI model.
@@ -56,6 +67,10 @@ func NewModel(s *soul.Soul, eventCh <-chan tea.Msg) Model {
 		soul:       s,
 		eventCh:    eventCh,
 		mdRenderer: newMarkdownRenderer(80),
+		approval: approvalState{
+			active:   false,
+			remember: false,
+		},
 	}
 }
 
@@ -106,6 +121,45 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.GotoBottom()
 
 	case tea.KeyMsg:
+		// Handle approval prompt keys first
+		if m.approval.active {
+			switch msg.String() {
+			case "y", "Y":
+				// Approve once
+				m.approval.active = false
+				m.soul.ApprovalCh <- soul.ApprovalResponse{
+					Approved:   true,
+					Remember:   false,
+					ToolCallID: m.approval.request.ToolCallID,
+					ToolName:   m.approval.request.ToolName,
+				}
+				return m, nil
+			case "s", "S":
+				// Approve for session
+				m.approval.active = false
+				m.soul.ApprovalCh <- soul.ApprovalResponse{
+					Approved:   true,
+					Remember:   true,
+					ToolCallID: m.approval.request.ToolCallID,
+					ToolName:   m.approval.request.ToolName,
+				}
+				return m, nil
+			case "n", "N":
+				// Deny
+				m.approval.active = false
+				m.soul.ApprovalCh <- soul.ApprovalResponse{
+					Approved:   false,
+					Remember:   false,
+					ToolCallID: m.approval.request.ToolCallID,
+					ToolName:   m.approval.request.ToolName,
+				}
+				return m, nil
+			default:
+				// Ignore other keys during approval
+				return m, nil
+			}
+		}
+
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			m.quitting = true
@@ -185,6 +239,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.textarea.Focus()
 		cmds = append(cmds, waitForSoulEvent(m.eventCh))
 
+	case ApprovalRequestMsg:
+		m.approval.active = true
+		m.approval.request = msg.Request
+		m.approval.remember = false
+		// Don't wait for next event here - the approval prompt handles input
+
 	case errMsg:
 		m.messages = append(m.messages, chatMsg{
 			Role:    string(wire.MessageTypeError),
@@ -231,16 +291,23 @@ func (m Model) View() string {
 	// Divider
 	divider := dividerStyle.Render(strings.Repeat("─", m.width))
 
-	// Input area or spinner
+	// Approval prompt takes precedence over input
 	var inputArea string
-	if m.loading {
+	if m.approval.active {
+		inputArea = renderApprovalPrompt(m.approval.request, m.width)
+	} else if m.loading {
 		inputArea = fmt.Sprintf("  %s Thinking...", m.spinner.View())
 	} else {
 		inputArea = m.textarea.View()
 	}
 
 	// Footer help
-	footer := helpStyle.Render("  Enter: send | Alt+Enter: newline | Ctrl+C: quit")
+	var footer string
+	if m.approval.active {
+		footer = helpStyle.Render("  y: approve once | s: approve for session | n: deny")
+	} else {
+		footer = helpStyle.Render("  Enter: send | Alt+Enter: newline | Ctrl+C: quit")
+	}
 
 	return fmt.Sprintf(
 		"%s\n%s\n%s\n%s\n%s",
@@ -250,6 +317,44 @@ func (m Model) View() string {
 		inputArea,
 		footer,
 	)
+}
+
+// renderApprovalPrompt renders the approval prompt UI.
+func renderApprovalPrompt(req *approval.ApprovalRequest, width int) string {
+	if req == nil {
+		return ""
+	}
+
+	var b strings.Builder
+
+	// Warning box
+	warningStyle := approvalWarningStyle
+	if !req.IsDangerous {
+		warningStyle = approvalSafeStyle
+	}
+
+	b.WriteString(warningStyle.Render(" ⚠️  Tool Approval Required "))
+	b.WriteString("\n\n")
+
+	// Tool details
+	b.WriteString(fmt.Sprintf("  Tool: %s\n", req.ToolName))
+	b.WriteString(fmt.Sprintf("  Arguments: %s\n", req.Arguments))
+
+	if req.IsDangerous {
+		b.WriteString("\n")
+		b.WriteString(warningStyle.Render("  This tool may modify your system. "))
+	}
+
+	b.WriteString("\n\n")
+	b.WriteString("  Press ")
+	b.WriteString(keyStyle.Render("y"))
+	b.WriteString(" to approve once, ")
+	b.WriteString(keyStyle.Render("s"))
+	b.WriteString(" to approve for session, ")
+	b.WriteString(keyStyle.Render("n"))
+	b.WriteString(" to deny.")
+
+	return b.String()
 }
 
 // waitForSoulEvent returns a command that waits for the next Soul event.

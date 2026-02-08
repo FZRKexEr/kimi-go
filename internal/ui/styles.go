@@ -32,4 +32,20 @@ var (
 
 	// dividerStyle styles the divider line (gray).
 	dividerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+
+	// approvalWarningStyle styles the approval warning for dangerous tools (red bold).
+	approvalWarningStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("1")).
+				Bold(true).
+				Background(lipgloss.Color("0"))
+
+	// approvalSafeStyle styles the approval prompt for safe tools (yellow).
+	approvalSafeStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("3")).
+				Bold(true)
+
+	// keyStyle styles key press hints (cyan bold).
+	keyStyle = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("6")).
+		Bold(true)
 )

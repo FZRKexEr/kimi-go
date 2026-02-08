@@ -2,6 +2,8 @@
 package ui
 
 import (
+	"kimi-go/internal/approval"
+	"kimi-go/internal/soul"
 	"kimi-go/internal/tools"
 	"kimi-go/internal/wire"
 )
@@ -28,6 +30,12 @@ type SoulErrorMsg struct {
 
 // SoulDoneMsg signals that Soul has finished processing a message.
 type SoulDoneMsg struct{}
+
+// ApprovalRequestMsg signals that user approval is needed for a tool call.
+type ApprovalRequestMsg struct {
+	Request *approval.ApprovalRequest
+	Soul    *soul.Soul
+}
 
 // errMsg is an internal UI error.
 type errMsg struct {

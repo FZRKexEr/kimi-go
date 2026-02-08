@@ -17,6 +17,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mattn/go-isatty"
 
+	"kimi-go/internal/approval"
 	"kimi-go/internal/config"
 	"kimi-go/internal/llm"
 	"kimi-go/internal/session"
@@ -308,6 +309,9 @@ func main() {
 		}
 		soulInstance.OnError = func(err error) {
 			eventCh <- ui.SoulErrorMsg{Err: err}
+		}
+		soulInstance.OnApprovalNeeded = func(req *approval.ApprovalRequest) {
+			eventCh <- ui.ApprovalRequestMsg{Request: req, Soul: soulInstance}
 		}
 
 		// Bridge DoneCh → eventCh

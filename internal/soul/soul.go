@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"kimi-go/internal/approval"
 	"kimi-go/internal/llm"
 	"kimi-go/internal/tools"
 	"kimi-go/internal/wire"
@@ -28,17 +29,21 @@ type Runtime struct {
 	YOLO       bool // Auto-approve mode
 	MaxSteps   int
 	MaxRetries int
+
+	// ApprovalManager handles tool execution approval
+	ApprovalManager *approval.Manager
 }
 
 // NewRuntime creates a new runtime.
 func NewRuntime(workDir string, yolo bool) *Runtime {
 	return &Runtime{
-		WorkDir:    workDir,
-		Config:     make(map[string]any),
-		Tools:      tools.NewToolSet(),
-		YOLO:       yolo,
-		MaxSteps:   100,
-		MaxRetries: 3,
+		WorkDir:         workDir,
+		Config:          make(map[string]any),
+		Tools:           tools.NewToolSet(),
+		YOLO:            yolo,
+		MaxSteps:        100,
+		MaxRetries:      3,
+		ApprovalManager: approval.NewManager(yolo),
 	}
 }
 
@@ -87,11 +92,24 @@ type Soul struct {
 	// DoneCh is closed after each message is fully processed
 	DoneCh chan struct{}
 
+	// ApprovalCh is used to request user approval for tool execution
+	// The bool response indicates whether the tool is approved
+	ApprovalCh chan ApprovalResponse
+
 	// Handlers
-	OnMessage    func(wire.Message)
-	OnToolCall   func(tools.ToolCall)
-	OnToolResult func(tools.ToolResult)
-	OnError      func(error)
+	OnMessage       func(wire.Message)
+	OnToolCall      func(tools.ToolCall)
+	OnToolResult    func(tools.ToolResult)
+	OnError         func(error)
+	OnApprovalNeeded func(*approval.ApprovalRequest) // Called when tool approval is needed
+}
+
+// ApprovalResponse represents a user response to an approval request.
+type ApprovalResponse struct {
+	Approved   bool
+	Remember   bool // If true, remember this decision for the session
+	ToolCallID string
+	ToolName   string
 }
 
 // NewSoul creates a new Soul instance.
@@ -104,6 +122,7 @@ func NewSoul(agent *Agent, ctx *Context) *Soul {
 		msgCh:      make(chan wire.Message, 100),
 		llmHistory: make([]llm.Message, 0),
 		DoneCh:     make(chan struct{}, 1),
+		ApprovalCh: make(chan ApprovalResponse, 1),
 	}
 }
 
@@ -391,7 +410,7 @@ func (s *Soul) handleError(err error) {
 	}
 }
 
-// executeToolCall executes a tool call.
+// executeToolCall executes a tool call with approval check.
 func (s *Soul) executeToolCall(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
 	tool, err := s.runtime.Tools.Get(call.Name)
 	if err != nil {
@@ -400,6 +419,38 @@ func (s *Soul) executeToolCall(ctx context.Context, call tools.ToolCall) (*tools
 			Success: false,
 			Error:   err.Error(),
 		}, nil
+	}
+
+	// Check if tool is approved
+	approvalMgr := s.runtime.ApprovalManager
+	if approvalMgr == nil {
+		approvalMgr = approval.NewManager(s.runtime.YOLO)
+	}
+
+	if !approvalMgr.IsApproved(call.Name) {
+		// Need user approval - request it via the callback
+		req := approvalMgr.NewApprovalRequest(call.ID, call.Name, string(call.Arguments))
+		if s.OnApprovalNeeded != nil {
+			s.OnApprovalNeeded(req)
+		}
+
+		// Wait for response via the ApprovalCh
+		select {
+		case resp := <-s.ApprovalCh:
+			if !resp.Approved {
+				return &tools.ToolResult{
+					CallID:  call.ID,
+					Success: false,
+					Error:   fmt.Sprintf("user denied execution of %s", call.Name),
+				}, nil
+			}
+			// If user wants to remember this decision, approve for session
+			if resp.Remember {
+				approvalMgr.ApproveForSession(call.Name)
+			}
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 
 	result, err := tool.Execute(ctx, call.Arguments)
