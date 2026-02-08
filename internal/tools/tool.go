@@ -90,6 +90,104 @@ type ToolResult struct {
 	Error   string `json:"error,omitempty"`
 }
 
+// TruncateLimits defines the truncation limits for tool output.
+const (
+	MaxToolOutputTotalChars = 50000 // Maximum total characters for tool output
+	MaxToolOutputLineChars  = 2000  // Maximum characters per line
+)
+
+// TruncateForLLM truncates the tool result for sending to LLM.
+// It applies per-line and total character limits.
+func (tr *ToolResult) TruncateForLLM() *ToolResult {
+	if tr == nil {
+		return nil
+	}
+
+	// Create a copy to avoid modifying the original (for UI display)
+	truncated := &ToolResult{
+		CallID:  tr.CallID,
+		Success: tr.Success,
+		Result:  tr.Result,
+		Error:   tr.Error,
+	}
+
+	// Truncate the result field
+	if len(truncated.Result) > 0 {
+		truncated.Result = truncateText(truncated.Result, MaxToolOutputTotalChars, MaxToolOutputLineChars)
+	}
+
+	// Also truncate error if present (though typically errors are short)
+	if len(truncated.Error) > MaxToolOutputTotalChars {
+		truncated.Error = truncateText(truncated.Error, MaxToolOutputTotalChars, MaxToolOutputLineChars)
+	}
+
+	return truncated
+}
+
+// truncateText applies line-by-line and total character limits.
+func truncateText(text string, maxTotal, maxLine int) string {
+	if len(text) <= maxTotal && maxLine <= 0 {
+		return text
+	}
+
+	var result []byte
+	totalLen := 0
+	lineStart := 0
+	truncated := false
+
+	for i := 0; i <= len(text); i++ {
+		// Check for line end or end of text
+		if i == len(text) || text[i] == '\n' {
+			line := text[lineStart:i]
+			lineEnd := i
+			if i < len(text) {
+				lineEnd++ // Include the newline
+			}
+
+			// Check if adding this line would exceed total limit
+			lineLen := len(line)
+			if lineLen > maxLine {
+				// Truncate this line
+				lineLen = maxLine
+				truncated = true
+			}
+
+			if totalLen+lineLen > maxTotal {
+				// Can't fit the whole line, add what we can
+				remaining := maxTotal - totalLen
+				if remaining > 0 {
+					result = append(result, line[:remaining]...)
+					totalLen += remaining
+				}
+				truncated = true
+				break
+			}
+
+			// Add the (possibly truncated) line
+			if len(line) > maxLine {
+				result = append(result, line[:maxLine]...)
+				if i < len(text) {
+					result = append(result, '\n')
+				}
+			} else {
+				result = append(result, text[lineStart:lineEnd]...)
+			}
+			totalLen += lineLen
+			if i < len(text) && len(line) <= maxLine {
+				totalLen++ // for newline
+			}
+
+			lineStart = i + 1
+		}
+	}
+
+	if truncated {
+		result = append(result, "\n... (output truncated)"...)
+	}
+
+	return string(result)
+}
+
 // GetToolInfo returns tool information for all registered tools.
 func (ts *ToolSet) GetToolInfo() []ToolInfo {
 	tools := ts.List()

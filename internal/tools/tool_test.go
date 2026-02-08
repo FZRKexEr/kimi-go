@@ -4,6 +4,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -303,5 +304,169 @@ func TestContextWithCancel(t *testing.T) {
 	// Check error
 	if ctx.Err() != context.Canceled {
 		t.Errorf("Expected Canceled, got %v", ctx.Err())
+	}
+}
+
+func TestTruncateForLLM(t *testing.T) {
+	tests := []struct {
+		name          string
+		result        *ToolResult
+		wantTruncated bool
+	}{
+		{
+			name: "short result - no truncation",
+			result: &ToolResult{
+				CallID:  "call-1",
+				Success: true,
+				Result:  "short result",
+			},
+			wantTruncated: false,
+		},
+		{
+			name: "long result - truncated",
+			result: &ToolResult{
+				CallID:  "call-2",
+				Success: true,
+				Result:  strings.Repeat("a", MaxToolOutputTotalChars+100),
+			},
+			wantTruncated: true,
+		},
+		{
+			name: "error result - truncated",
+			result: &ToolResult{
+				CallID:  "call-3",
+				Success: false,
+				Error:   strings.Repeat("e", MaxToolOutputTotalChars+100),
+			},
+			wantTruncated: true,
+		},
+		{
+			name:          "nil result",
+			result:        nil,
+			wantTruncated: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			truncated := tt.result.TruncateForLLM()
+			if tt.result == nil {
+				if truncated != nil {
+					t.Errorf("TruncateForLLM() = %v, want nil", truncated)
+				}
+				return
+			}
+
+			if tt.result.Success {
+				hasTruncatedMsg := strings.Contains(truncated.Result, "... (output truncated)")
+				if hasTruncatedMsg != tt.wantTruncated {
+					t.Errorf("TruncateForLLM() truncated = %v, want %v", hasTruncatedMsg, tt.wantTruncated)
+				}
+			} else {
+				hasTruncatedMsg := strings.Contains(truncated.Error, "... (output truncated)")
+				if hasTruncatedMsg != tt.wantTruncated {
+					t.Errorf("TruncateForLLM() error truncated = %v, want %v", hasTruncatedMsg, tt.wantTruncated)
+				}
+			}
+
+			// Verify original is not modified
+			if len(tt.result.Result) > MaxToolOutputTotalChars+100 {
+				if len(tt.result.Result) != MaxToolOutputTotalChars+100 {
+					t.Error("Original result was modified")
+				}
+			}
+		})
+	}
+}
+
+func TestTruncateText(t *testing.T) {
+	tests := []struct {
+		name     string
+		text     string
+		maxTotal int
+		maxLine  int
+		want     string
+	}{
+		{
+			name:     "no truncation needed",
+			text:     "short text",
+			maxTotal: 100,
+			maxLine:  50,
+			want:     "short text",
+		},
+		{
+			name:     "long line truncated",
+			text:     strings.Repeat("a", 3000),
+			maxTotal: 50000,
+			maxLine:  2000,
+			want:     strings.Repeat("a", 2000) + "\n... (output truncated)",
+		},
+		{
+			name:     "empty string",
+			text:     "",
+			maxTotal: 100,
+			maxLine:  50,
+			want:     "",
+		},
+		{
+			name:     "exactly at limit",
+			text:     strings.Repeat("a", 100),
+			maxTotal: 100,
+			maxLine:  2000,
+			want:     strings.Repeat("a", 100),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateText(tt.text, tt.maxTotal, tt.maxLine)
+			if got != tt.want {
+				t.Errorf("truncateText() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTruncateTextPerLine(t *testing.T) {
+	// Test that long lines are truncated
+	longLine := strings.Repeat("a", 2500)
+	text := "short line\n" + longLine + "\nanother short line"
+
+	result := truncateText(text, 50000, 2000)
+
+	// Check that the long line was truncated
+	if !strings.Contains(result, strings.Repeat("a", 2000)) {
+		t.Error("Long line should be truncated to 2000 chars")
+	}
+
+	// Check that short lines are preserved
+	if !strings.Contains(result, "short line") {
+		t.Error("Short lines should be preserved")
+	}
+
+	// Check truncation message is present
+	if !strings.Contains(result, "... (output truncated)") {
+		t.Error("Truncation message should be present")
+	}
+}
+
+func TestTruncateTextTotalLimit(t *testing.T) {
+	// Create text that exceeds total limit
+	lines := make([]string, 100)
+	for i := range lines {
+		lines[i] = strings.Repeat("x", 1000)
+	}
+	text := strings.Join(lines, "\n")
+
+	result := truncateText(text, 50000, 2000)
+
+	// Result should be at most 50000 + truncation message
+	if len(result) > 50000+len("\n... (output truncated)") {
+		t.Errorf("Result length %d exceeds limit", len(result))
+	}
+
+	// Should have truncation message
+	if !strings.HasSuffix(result, "... (output truncated)") {
+		t.Error("Result should end with truncation message")
 	}
 }

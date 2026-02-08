@@ -292,10 +292,17 @@ func (s *Soul) processWithLLM(ctx context.Context, userMsg wire.Message) error {
 					resultText = fmt.Sprintf("Error: %s", result.Error)
 				}
 
+				// Truncate result for LLM (UI still shows full output via OnToolResult)
+				truncatedResult := result.TruncateForLLM()
+				llmResultText := truncatedResult.Result
+				if !truncatedResult.Success {
+					llmResultText = fmt.Sprintf("Error: %s", truncatedResult.Error)
+				}
+
 				// Add tool result to LLM history and messages
 				toolResultMsg := llm.Message{
 					Role:       "tool",
-					Content:    resultText,
+					Content:    llmResultText,
 					ToolCallID: tc.ID,
 				}
 				s.llmHistory = append(s.llmHistory, toolResultMsg)
