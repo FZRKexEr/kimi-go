@@ -476,3 +476,59 @@ func TestChatStream_EmptyLines(t *testing.T) {
 		t.Errorf("expected 1 chunk, got %d", count)
 	}
 }
+
+func TestChatStreamWithTools_Success(t *testing.T) {
+	server, client := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var req ChatRequest
+		json.NewDecoder(r.Body).Decode(&req)
+
+		if !req.Stream {
+			t.Error("ChatStreamWithTools should set stream=true")
+		}
+		if len(req.Tools) != 1 {
+			t.Errorf("expected 1 tool, got %d", len(req.Tools))
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunks := []string{
+			`{"id":"1","choices":[{"delta":{"content":"I'll"}}]}`,
+			`{"id":"2","choices":[{"delta":{"content":" help"}}]}`,
+			`{"id":"3","choices":[{"delta":{"content":" you."}}]}`,
+		}
+		for _, chunk := range chunks {
+			fmt.Fprintf(w, "data: %s\n\n", chunk)
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	})
+	defer server.Close()
+
+	tools := []ToolDef{
+		{
+			Type: "function",
+			Function: FunctionDef{
+				Name:        "shell",
+				Description: "Execute shell commands",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}}}`),
+			},
+		},
+	}
+
+	respCh, errCh := client.ChatStreamWithTools(context.Background(), []Message{
+		{Role: "user", Content: "Hi"},
+	}, tools)
+
+	var content strings.Builder
+	for chunk := range respCh {
+		if len(chunk.Choices) > 0 {
+			content.WriteString(chunk.Choices[0].Delta.Content)
+		}
+	}
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("stream error: %v", err)
+	}
+
+	if content.String() != "I'll help you." {
+		t.Errorf("expected 'I'll help you.', got %q", content.String())
+	}
+}

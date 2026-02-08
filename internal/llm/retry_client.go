@@ -122,10 +122,23 @@ func (c *RetryableClient) ChatStream(
 	return c.inner.ChatStream(ctx, messages)
 }
 
-// Ensure RetryableClient implements the same interface as Client
+// ChatStreamWithTools 带重试的流式聊天调用（支持工具）
+func (c *RetryableClient) ChatStreamWithTools(
+	ctx context.Context,
+	messages []Message,
+	tools []ToolDef,
+) (<-chan ChatResponse, <-chan error) {
+	// 流式调用的重试比较复杂，暂时委托给内部客户端
+	// 后续可以考虑实现断点续传的重试机制
+	return c.inner.ChatStreamWithTools(ctx, messages, tools)
+}
+
+// Ensure RetryableClient implements the same interface as Client (including streaming methods)
 var _ interface {
 	Chat(ctx context.Context, messages []Message) (*ChatResponse, error)
 	ChatWithTools(ctx context.Context, messages []Message, tools []ToolDef) (*ChatResponse, error)
+	ChatStream(ctx context.Context, messages []Message) (<-chan ChatResponse, <-chan error)
+	ChatStreamWithTools(ctx context.Context, messages []Message, tools []ToolDef) (<-chan ChatResponse, <-chan error)
 } = (*RetryableClient)(nil)
 
 // RetryConfigFromProvider 从 ProviderConfig 创建 RetryConfig
