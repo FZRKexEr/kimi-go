@@ -435,21 +435,31 @@ func (s *Soul) executeToolCall(ctx context.Context, call tools.ToolCall) (*tools
 		}
 
 		// Wait for response via the ApprovalCh
-		select {
-		case resp := <-s.ApprovalCh:
-			if !resp.Approved {
-				return &tools.ToolResult{
-					CallID:  call.ID,
-					Success: false,
-					Error:   fmt.Sprintf("user denied execution of %s", call.Name),
-				}, nil
+		// Keep reading until we get a matching response for this tool call
+		for {
+			select {
+			case resp := <-s.ApprovalCh:
+				// Ensure the response corresponds to this tool call
+				if resp.ToolCallID != call.ID {
+					// Mismatched response; discard and continue waiting
+					continue
+				}
+				if !resp.Approved {
+					return &tools.ToolResult{
+						CallID:  call.ID,
+						Success: false,
+						Error:   fmt.Sprintf("user denied execution of %s", call.Name),
+					}, nil
+				}
+				// If user wants to remember this decision, approve for session
+				if resp.Remember {
+					approvalMgr.ApproveForSession(call.Name)
+				}
+				break // Matching response handled; proceed to execute
+			case <-ctx.Done():
+				return nil, ctx.Err()
 			}
-			// If user wants to remember this decision, approve for session
-			if resp.Remember {
-				approvalMgr.ApproveForSession(call.Name)
-			}
-		case <-ctx.Done():
-			return nil, ctx.Err()
+			break
 		}
 	}
 

@@ -123,40 +123,47 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		// Handle approval prompt keys first
 		if m.approval.active {
-			switch msg.String() {
-			case "y", "Y":
-				// Approve once
-				m.approval.active = false
-				m.soul.ApprovalCh <- soul.ApprovalResponse{
-					Approved:   true,
-					Remember:   false,
-					ToolCallID: m.approval.request.ToolCallID,
-					ToolName:   m.approval.request.ToolName,
-				}
-				return m, nil
-			case "s", "S":
-				// Approve for session
-				m.approval.active = false
-				m.soul.ApprovalCh <- soul.ApprovalResponse{
-					Approved:   true,
-					Remember:   true,
-					ToolCallID: m.approval.request.ToolCallID,
-					ToolName:   m.approval.request.ToolName,
-				}
-				return m, nil
-			case "n", "N":
-				// Deny
-				m.approval.active = false
-				m.soul.ApprovalCh <- soul.ApprovalResponse{
-					Approved:   false,
-					Remember:   false,
-					ToolCallID: m.approval.request.ToolCallID,
-					ToolName:   m.approval.request.ToolName,
-				}
-				return m, nil
+			switch msg.Type {
+			case tea.KeyCtrlC:
+				// Allow quitting even during approval
+				m.quitting = true
+				return m, tea.Quit
 			default:
-				// Ignore other keys during approval
-				return m, nil
+				switch msg.String() {
+				case "y", "Y":
+					// Approve once
+					m.approval.active = false
+					m.soul.ApprovalCh <- soul.ApprovalResponse{
+						Approved:   true,
+						Remember:   false,
+						ToolCallID: m.approval.request.ToolCallID,
+						ToolName:   m.approval.request.ToolName,
+					}
+					return m, nil
+				case "s", "S":
+					// Approve for session
+					m.approval.active = false
+					m.soul.ApprovalCh <- soul.ApprovalResponse{
+						Approved:   true,
+						Remember:   true,
+						ToolCallID: m.approval.request.ToolCallID,
+						ToolName:   m.approval.request.ToolName,
+					}
+					return m, nil
+				case "n", "N":
+					// Deny
+					m.approval.active = false
+					m.soul.ApprovalCh <- soul.ApprovalResponse{
+						Approved:   false,
+						Remember:   false,
+						ToolCallID: m.approval.request.ToolCallID,
+						ToolName:   m.approval.request.ToolName,
+					}
+					return m, nil
+				default:
+					// Ignore other keys during approval
+					return m, nil
+				}
 			}
 		}
 

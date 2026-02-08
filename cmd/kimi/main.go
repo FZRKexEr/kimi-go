@@ -167,7 +167,7 @@ func main() {
 		configPath = flag.String("config", "", "Path to config file")
 		workDir    = flag.String("work-dir", "", "Working directory")
 		sessionID  = flag.String("session", "", "Session ID to continue")
-		yolo       = flag.Bool("yolo", false, "Auto-approve all actions")
+		yolo       = flag.Bool("yolo", false, "Auto-approve all actions (YOLO mode)")
 		version    = flag.Bool("version", false, "Show version")
 	)
 	flag.Parse()
@@ -207,8 +207,14 @@ func main() {
 	fmt.Printf("Session: %s\n", sess.ID)
 	fmt.Printf("WorkDir: %s\n", sess.WorkDir)
 
+	// Determine YOLO mode: flag takes precedence, then config, then default (false)
+	yoloMode := cfg.DefaultYOLO
+	if *yolo {
+		yoloMode = true
+	}
+
 	// Create runtime
-	rt := soul.NewRuntime(sess.WorkDir, *yolo)
+	rt := soul.NewRuntime(sess.WorkDir, yoloMode)
 	rt.MaxSteps = cfg.LoopControl.MaxStepsPerTurn
 	rt.MaxRetries = cfg.LoopControl.MaxRetriesPerStep
 
@@ -341,6 +347,9 @@ func main() {
 		}
 	} else {
 		// ── Plain REPL mode (non-TTY / pipe input) ──
+		// Force YOLO mode in REPL to avoid blocking on approval (no TUI to handle approval)
+		rt.YOLO = true
+
 		soulInstance.OnMessage = func(msg wire.Message) {
 			switch msg.Type {
 			case wire.MessageTypeAssistant:
