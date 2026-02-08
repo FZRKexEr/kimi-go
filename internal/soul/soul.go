@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,28 +18,32 @@ import (
 type LLMClient interface {
 	Chat(ctx context.Context, messages []llm.Message) (*llm.ChatResponse, error)
 	ChatWithTools(ctx context.Context, messages []llm.Message, tools []llm.ToolDef) (*llm.ChatResponse, error)
+	ChatStream(ctx context.Context, messages []llm.Message) (<-chan llm.ChatResponse, <-chan error)
+	ChatStreamWithTools(ctx context.Context, messages []llm.Message, tools []llm.ToolDef) (<-chan llm.ChatResponse, <-chan error)
 }
 
 // Runtime provides the execution environment for the agent.
 type Runtime struct {
-	WorkDir    string
-	Config     map[string]any
-	Tools      *tools.ToolSet
-	LLMClient  LLMClient
-	YOLO       bool // Auto-approve mode
-	MaxSteps   int
-	MaxRetries int
+	WorkDir     string
+	Config      map[string]any
+	Tools       *tools.ToolSet
+	LLMClient   LLMClient
+	YOLO        bool // Auto-approve mode
+	MaxSteps    int
+	MaxRetries  int
+	UseStreaming bool // Enable streaming mode for responses
 }
 
 // NewRuntime creates a new runtime.
 func NewRuntime(workDir string, yolo bool) *Runtime {
 	return &Runtime{
-		WorkDir:    workDir,
-		Config:     make(map[string]any),
-		Tools:      tools.NewToolSet(),
-		YOLO:       yolo,
-		MaxSteps:   100,
-		MaxRetries: 3,
+		WorkDir:      workDir,
+		Config:       make(map[string]any),
+		Tools:        tools.NewToolSet(),
+		YOLO:         yolo,
+		MaxSteps:     100,
+		MaxRetries:   3,
+		UseStreaming: true, // Enable streaming by default
 	}
 }
 
@@ -88,10 +93,11 @@ type Soul struct {
 	DoneCh chan struct{}
 
 	// Handlers
-	OnMessage    func(wire.Message)
-	OnToolCall   func(tools.ToolCall)
-	OnToolResult func(tools.ToolResult)
-	OnError      func(error)
+	OnMessage     func(wire.Message)
+	OnToolCall    func(tools.ToolCall)
+	OnToolResult  func(tools.ToolResult)
+	OnError       func(error)
+	OnStreamChunk func(string) // Called for each streaming chunk
 }
 
 // NewSoul creates a new Soul instance.
@@ -231,17 +237,34 @@ func (s *Soul) processWithLLM(ctx context.Context, userMsg wire.Message) error {
 
 	// Agent loop
 	for step := 0; step < s.runtime.MaxSteps; step++ {
-		resp, err := client.ChatWithTools(ctx, messages, toolDefs)
-		if err != nil {
-			return fmt.Errorf("LLM request failed: %w", err)
+		// Use streaming for the final response (when no tools are registered)
+		// or fall back to non-streaming if streaming is disabled
+		useStreaming := s.runtime.UseStreaming && len(toolDefs) == 0
+
+		var assistantMsg llm.Message
+		var streamErr error
+
+		if useStreaming {
+			assistantMsg, streamErr = s.processWithStreaming(ctx, client, messages)
+			if streamErr != nil {
+				// Fall back to non-streaming on error
+				useStreaming = false
+			}
 		}
 
-		if len(resp.Choices) == 0 {
-			return fmt.Errorf("LLM returned no choices")
-		}
+		if !useStreaming {
+			// Non-streaming mode (for tool calls or fallback)
+			resp, err := client.ChatWithTools(ctx, messages, toolDefs)
+			if err != nil {
+				return fmt.Errorf("LLM request failed: %w", err)
+			}
 
-		choice := resp.Choices[0]
-		assistantMsg := choice.Message
+			if len(resp.Choices) == 0 {
+				return fmt.Errorf("LLM returned no choices")
+			}
+
+			assistantMsg = resp.Choices[0].Message
+		}
 
 		// Add assistant message to LLM history
 		s.llmHistory = append(s.llmHistory, assistantMsg)
@@ -344,6 +367,79 @@ func (s *Soul) processWithLLM(ctx context.Context, userMsg wire.Message) error {
 	}
 
 	return fmt.Errorf("agent loop exceeded maximum steps (%d)", s.runtime.MaxSteps)
+}
+
+// processWithStreaming handles streaming LLM responses for real-time display.
+// Returns the complete message when streaming is done.
+func (s *Soul) processWithStreaming(ctx context.Context, client LLMClient, messages []llm.Message) (llm.Message, error) {
+	var contentBuilder strings.Builder
+	var assistantMsg llm.Message
+	assistantMsg.Role = "assistant"
+
+	// Create a placeholder message for streaming display
+	streamingMsg := wire.Message{
+		Type: wire.MessageTypeAssistant,
+		Content: []wire.ContentPart{{
+			Type: "text",
+			Text: "",
+		}},
+		Timestamp: time.Now(),
+	}
+
+	// Send initial empty message to UI
+	if s.OnMessage != nil {
+		s.OnMessage(streamingMsg)
+	}
+
+	// Start streaming
+	respCh, errCh := client.ChatStream(ctx, messages)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return assistantMsg, ctx.Err()
+
+		case err := <-errCh:
+			if err != nil {
+				return assistantMsg, err
+			}
+
+		case chunk, ok := <-respCh:
+			if !ok {
+				// Stream closed, finalize message
+				assistantMsg.Content = contentBuilder.String()
+				return assistantMsg, nil
+			}
+
+			if len(chunk.Choices) == 0 {
+				continue
+			}
+
+			delta := chunk.Choices[0].Delta
+
+			// Handle content delta
+			if delta.Content != "" {
+				contentBuilder.WriteString(delta.Content)
+
+				// Emit streaming chunk callback
+				if s.OnStreamChunk != nil {
+					s.OnStreamChunk(delta.Content)
+				}
+
+				// Update streaming message with current content
+				streamingMsg.Content[0].Text = contentBuilder.String()
+				if s.OnMessage != nil {
+					s.OnMessage(streamingMsg)
+				}
+			}
+
+			// Check for finish reason
+			if chunk.Choices[0].FinishReason != "" {
+				assistantMsg.Content = contentBuilder.String()
+				return assistantMsg, nil
+			}
+		}
+	}
 }
 
 // buildLLMMessages constructs the full message list including system prompt.

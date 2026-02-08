@@ -134,6 +134,11 @@ var _ interface {
 
 // ChatStream sends a streaming chat completion request.
 func (c *Client) ChatStream(ctx context.Context, messages []Message) (<-chan ChatResponse, <-chan error) {
+	return c.ChatStreamWithTools(ctx, messages, nil)
+}
+
+// ChatStreamWithTools sends a streaming chat completion request with tool definitions.
+func (c *Client) ChatStreamWithTools(ctx context.Context, messages []Message, tools []ToolDef) (<-chan ChatResponse, <-chan error) {
 	responseChan := make(chan ChatResponse)
 	errorChan := make(chan error, 1)
 
@@ -145,6 +150,7 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message) (<-chan Cha
 			Model:    c.model,
 			Messages: messages,
 			Stream:   true,
+			Tools:    tools,
 		}
 
 		if err := c.sendStreamRequest(ctx, reqBody, responseChan); err != nil {

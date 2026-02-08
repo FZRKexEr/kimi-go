@@ -29,6 +29,10 @@ type Model struct {
 	mdRenderer *markdownRenderer
 	width      int
 	height     int
+
+	// Streaming state
+	streaming      bool
+	streamingIndex int // Index of the message being streamed
 }
 
 // NewModel creates a new TUI model.
@@ -142,7 +146,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case SoulMessageMsg:
-		m.messages = append(m.messages, newChatMsgFromWire(msg.Message))
+		// Check if this is a streaming update (assistant message with existing content)
+		newMsg := newChatMsgFromWire(msg.Message)
+		if newMsg.Role == string(wire.MessageTypeAssistant) && m.streaming && m.streamingIndex >= 0 {
+			// Update existing streaming message
+			m.messages[m.streamingIndex] = newMsg
+		} else {
+			// New message
+			m.messages = append(m.messages, newMsg)
+			// If it's an assistant message and we're loading, mark as streaming
+			if newMsg.Role == string(wire.MessageTypeAssistant) && m.loading {
+				m.streaming = true
+				m.streamingIndex = len(m.messages) - 1
+			}
+		}
 		m.viewport.SetContent(renderConversation(m.messages, m.mdRenderer))
 		m.viewport.GotoBottom()
 		cmds = append(cmds, waitForSoulEvent(m.eventCh))
@@ -182,6 +199,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case SoulDoneMsg:
 		m.loading = false
+		m.streaming = false
+		m.streamingIndex = -1
 		m.textarea.Focus()
 		cmds = append(cmds, waitForSoulEvent(m.eventCh))
 
@@ -234,7 +253,11 @@ func (m Model) View() string {
 	// Input area or spinner
 	var inputArea string
 	if m.loading {
-		inputArea = fmt.Sprintf("  %s Thinking...", m.spinner.View())
+		if m.streaming {
+			inputArea = fmt.Sprintf("  %s Receiving...", m.spinner.View())
+		} else {
+			inputArea = fmt.Sprintf("  %s Thinking...", m.spinner.View())
+		}
 	} else {
 		inputArea = m.textarea.View()
 	}
